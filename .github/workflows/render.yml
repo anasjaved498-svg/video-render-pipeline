@@ -10,7 +10,7 @@ jobs:
   render:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for the music asset)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Ensure ffmpeg is present
@@ -18,7 +18,11 @@ jobs:
 
       - name: Download source video from Google Drive
         run: |
-          FILE_ID=$(echo "${{ github.event.client_payload.video_url }}" | grep -o 'id=[^&]*' | cut -d= -f2)
+          URL="${{ github.event.client_payload.video_url }}"
+          FILE_ID=$(echo "$URL" | grep -o 'id=[^&]*' | cut -d= -f2)
+          if [ -z "$FILE_ID" ]; then
+            FILE_ID=$(echo "$URL" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
+          fi
           curl -L -c /tmp/cookies.txt "https://docs.google.com/uc?export=download&id=${FILE_ID}" > /tmp/confirm.html
           CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/confirm.html | head -n 1 | cut -d= -f2)
           curl -L -b /tmp/cookies.txt "https://docs.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}" -o source.mp4
