@@ -36,13 +36,25 @@ jobs:
       - name: Install FFmpeg & Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl jq
+          sudo apt-get install -y ffmpeg curl jq file
 
       - name: Resolve Inputs & Setup Parameters
+        env:
+          INPUT_AUDIO: ${{ inputs.audio_file }}
+          PAYLOAD_AUDIO: ${{ github.event.client_payload.audio_file }}
+          INPUT_TITLE: ${{ inputs.video_title }}
+          PAYLOAD_TITLE: ${{ github.event.client_payload.title }}
+          PAYLOAD_URL: ${{ github.event.client_payload.video_url }}
+          INPUT_COLOR: ${{ inputs.text_color }}
+          PAYLOAD_COLOR: ${{ github.event.client_payload.text_color }}
+          INPUT_SIZE: ${{ inputs.text_size }}
+          PAYLOAD_SIZE: ${{ github.event.client_payload.text_size }}
+          INPUT_POS: ${{ inputs.text_position }}
+          PAYLOAD_POS: ${{ github.event.client_payload.text_position }}
         run: |
           mkdir -p assets output
 
-          AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
+          AUDIO_NAME="${INPUT_AUDIO:-$PAYLOAD_AUDIO}"
 
           if [ -z "$AUDIO_NAME" ]; then
             AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename 2>/dev/null)
@@ -59,13 +71,13 @@ jobs:
             echo "Using background audio: $TARGET_PATH"
           fi
 
-          TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
-          VIDEO_URL="${{ github.event.client_payload.video_url || 'https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u' }}"
-          COLOR="${{ inputs.text_color || github.event.client_payload.text_color || 'white' }}"
-          SIZE="${{ inputs.text_size || github.event.client_payload.text_size || '48' }}"
-          POSITION="${{ inputs.text_position || github.event.client_payload.text_position || 'top' }}"
+          TITLE_TEXT="${INPUT_TITLE:-${PAYLOAD_TITLE:-Default Title}}"
+          VIDEO_URL="${PAYLOAD_URL:-https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u}"
+          COLOR="${INPUT_COLOR:-${PAYLOAD_COLOR:-white}}"
+          SIZE="${INPUT_SIZE:-${PAYLOAD_SIZE:-48}}"
+          POSITION="${INPUT_POS:-${PAYLOAD_POS:-top}}"
 
-          # Clean newlines and escape special characters for FFmpeg drawtext
+          # Format string safely for FFmpeg drawtext
           ESCAPED_TITLE=$(echo "$TITLE_TEXT" | tr '\n' ' ' | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
 
           if [ "$POSITION" = "center" ]; then
@@ -76,7 +88,6 @@ jobs:
             Y_POS="50"
           fi
 
-          # Safe multi-line string writing to GITHUB_ENV
           echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
           echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
           echo "TEXT_COLOR=${COLOR}" >> $GITHUB_ENV
@@ -89,11 +100,18 @@ jobs:
 
       - name: Download Video Source
         run: |
-          echo "Downloading base video from Google Drive..."
-          curl -L -o source.mp4 "$SRC_URL"
+          echo "Downloading base video..."
+          FILE_ID="14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u"
+          curl -c /tmp/cookies -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
+          CONFIRM=$(cat /tmp/cookies | grep -i download_warning | awk '{print $7}')
+          if [ -n "$CONFIRM" ]; then
+            curl -Lb /tmp/cookies -o source.mp4 "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}"
+          else
+            curl -L -o source.mp4 "$SRC_URL"
+          fi
 
-          if [ ! -s source.mp4 ]; then
-            echo "Error: Downloaded video file is empty."
+          if [ ! -s source.mp4 ] || file source.mp4 | grep -q "HTML"; then
+            echo "Error: Downloaded file is empty or returned an invalid HTML page."
             exit 1
           fi
 
