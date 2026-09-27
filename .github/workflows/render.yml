@@ -1,114 +1,140 @@
-name: Render Video
+name: Video Render Pipeline
+
 on:
-  repository_dispatch:
-    types: [render_video]
   workflow_dispatch:
     inputs:
       audio_file:
-        description: 'Selected background audio filename from assets/'
+        description: 'Selected MP3 audio file from assets/'
         required: false
+        default: ''
       video_title:
-        description: 'Text overlay title'
+        description: 'Text title overlay (and hashtags) for the video'
         required: false
-        default: 'Sample Title'
-
-permissions:
-  contents: write
+        default: 'Default Title'
+      text_color:
+        description: 'Text overlay color (white, yellow, red, cyan, green)'
+        required: false
+        default: 'white'
+      text_size:
+        description: 'Text font size (36, 48, 64)'
+        required: false
+        default: '48'
+      text_position:
+        description: 'Text position (top, center, bottom)'
+        required: false
+        default: 'top'
+  repository_dispatch:
+    types: [trigger-render]
 
 jobs:
   render:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
-      - name: Ensure ffmpeg and fonts are present
+      - name: Install FFmpeg & Tools
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y ffmpeg fonts-dejavu-core
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl jq
 
-      - name: Resolve Inputs
+      - name: Resolve Inputs & Setup Parameters
         run: |
-          mkdir -p assets
+          mkdir -p assets output
 
-          # 1. Read input audio parameter
+          # Extract audio input (handles workflow_dispatch and repository_dispatch)
           AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
-          
-          # 2. If no song specified, take the first valid mp3 in assets/
+
+          # If no audio provided, check if any MP3 exists in assets/
           if [ -z "$AUDIO_NAME" ]; then
             AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename 2>/dev/null)
           fi
 
-          # 3. Verify audio file integrity with ffprobe; generate silent fallback if missing or corrupt
           TARGET_PATH="assets/${AUDIO_NAME}"
+
+          # Fallback to generating silent audio if no file exists or file is invalid
           if [ -z "$AUDIO_NAME" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "Selected audio '${AUDIO_NAME}' is missing or invalid. Generating fallback audio..."
+            echo "No valid audio selected. Generating 10s fallback audio..."
             AUDIO_NAME="silent_fallback.mp3"
             TARGET_PATH="assets/silent_fallback.mp3"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
           else
-            echo "Using valid background audio: $TARGET_PATH"
+            echo "Using background audio: $TARGET_PATH"
           fi
 
+          # Extract styling parameters
           TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
           VIDEO_URL="${{ github.event.client_payload.video_url || 'https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u' }}"
+          COLOR="${{ inputs.text_color || github.event.client_payload.text_color || 'white' }}"
+          SIZE="${{ inputs.text_size || github.event.client_payload.text_size || '48' }}"
+          POSITION="${{ inputs.text_position || github.event.client_payload.text_position || 'top' }}"
 
-          echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
-          echo "VIDEO_TITLE=${TITLE_TEXT}" >> $GITHUB_ENV
-          echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
+          # Escape title text for FFmpeg filter compatibility
+          ESCAPED_TITLE=$(echo "$TITLE_TEXT" | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
 
-      - name: Download source video from Google Drive
-        run: |
-          FILE_ID=$(echo "$SRC_URL" | grep -o 'id=[^&]*' | cut -d= -f2)
-          if [ -z "$FILE_ID" ]; then
-            FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
+          # Calculate vertical text positioning (Y-axis)
+          if [ "$POSITION" = "center" ]; then
+            Y_POS="(h-text_h)/2"
+          elif [ "$POSITION" = "bottom" ]; then
+            Y_POS="h-text_h-50"
+          else
+            Y_POS="50"
           fi
-          curl -L -c /tmp/cookies.txt "https://docs.google.com/uc?export=download&id=${FILE_ID}" > /tmp/confirm.html
-          CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/confirm.html | head -n 1 | cut -d= -f2)
-          curl -L -b /tmp/cookies.txt "https://docs.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}" -o source.mp4
 
-      - name: Render — overlay title + mix background music
+          # Export variables to GitHub Environment
+          echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
+          echo "VIDEO_TITLE=${ESCAPED_TITLE}" >> $GITHUB_ENV
+          echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
+          echo "TEXT_COLOR=${COLOR}" >> $GITHUB_ENV
+          echo "TEXT_SIZE=${SIZE}" >> $GITHUB_ENV
+          echo "Y_POSITION=${Y_POS}" >> $GITHUB_ENV
+
+      - name: Download Video Source
+        run: |
+          echo "Downloading base video from Google Drive..."
+          curl -L -o source.mp4 "$SRC_URL"
+
+          if [ ! -s source.mp4 ]; then
+            echo "Error: Downloaded video file is empty."
+            exit 1
+          fi
+
+      - name: Render Video — Overlay Text & Mix Audio
         run: |
           HAS_AUDIO=$(ffprobe -i source.mp4 -show_streams -select_streams a -loglevel error | wc -l)
           FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
+          echo "Rendering with options:"
+          echo "  - Title: $VIDEO_TITLE"
+          echo "  - Text Color: $TEXT_COLOR"
+          echo "  - Font Size: $TEXT_SIZE"
+          echo "  - Position Y: $Y_POSITION"
+          echo "  - Audio Track: $SELECTED_AUDIO"
+
           if [ "$HAS_AUDIO" -gt 0 ]; then
-            echo "Mixing audio with \"$SELECTED_AUDIO\""
+            echo "Mixing base video audio with selected background music..."
             ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
-                [0:v]drawtext=fontfile=${FONT_PATH}:text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
-                  box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50[v];
+                [0:v]drawtext=fontfile=${FONT_PATH}:text='${VIDEO_TITLE}':fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:
+                  box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=${Y_POSITION}[v];
                 [0:a][1:a]amix=inputs=2:duration=first:weights='1 0.4'[a]
               " \
               -map "[v]" -map "[a]" -c:v libx264 -preset fast -c:a aac \
-              -shortest output.mp4
+              -shortest output/rendered_video.mp4
           else
-            echo "Using \"$SELECTED_AUDIO\" as primary audio track"
+            echo "Video has no audio track. Setting background music as primary audio..."
             ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
-                [0:v]drawtext=fontfile=${FONT_PATH}:text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
-                  box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50[v]
+                [0:v]drawtext=fontfile=${FONT_PATH}:text='${VIDEO_TITLE}':fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:
+                  box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=${Y_POSITION}[v]
               " \
               -map "[v]" -map 1:a -c:v libx264 -preset fast -c:a aac \
-              -shortest output.mp4
+              -shortest output/rendered_video.mp4
           fi
 
-      - name: Upload rendered video as a Release asset
-        id: release
-        uses: softprops/action-gh-release@v2
+      - name: Upload Output Video Artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: render-${{ github.run_id }}
-          files: output.mp4
-          make_latest: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Callback to n8n with the public video URL
-        run: |
-          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/render-${{ github.run_id }}/output.mp4"
-          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
-            -H "Content-Type: application/json" \
-            -H "X-Webhook-Secret: ${{ secrets.WEBHOOK_SECRET }}" \
-            -d "{\"video_url\": \"${ASSET_URL}\", \"title\": \"${VIDEO_TITLE}\"}"
+          name: rendered-video
+          path: output/rendered_video.mp4
+          retention-days: 7
