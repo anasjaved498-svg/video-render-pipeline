@@ -161,44 +161,28 @@ jobs:
       - name: Download Video Source
         run: |
           set -euo pipefail
+          
+          # Install gdown to reliably handle Google Drive files of any size
+          pip install --no-cache-dir gdown
+
+          # Extract the file ID from the URL
           FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
 
-          download_with_confirm() {
-            local file_id="$1"
-            local cookie_jar
-            cookie_jar=$(mktemp)
-
-            # First pass: hit the page, capture cookies + body
-            curl -sc "$cookie_jar" -L \
-              "https://drive.google.com/uc?export=download&id=${file_id}" \
-              -o /tmp/gdrive_first.html
-
-            # Try to find a confirm token either in the cookie jar (classic
-            # flow) or embedded in the page body (current flow for many
-            # files). Fall back to confirm=t if neither is found.
-            local confirm
-            confirm=$(grep -o 'download_warning[^;]*' "$cookie_jar" | awk '{print $NF}' | head -n1 || true)
-            if [ -z "$confirm" ]; then
-              confirm=$(grep -o 'confirm=[0-9A-Za-z_-]*' /tmp/gdrive_first.html | head -n1 | cut -d= -f2 || true)
-            fi
-            confirm="${confirm:-t}"
-
-            curl -sLb "$cookie_jar" -o source.mp4 \
-              "https://drive.google.com/uc?export=download&confirm=${confirm}&id=${file_id}"
-            rm -f "$cookie_jar" /tmp/gdrive_first.html
-          }
-
           if [ -n "$FILE_ID" ]; then
-            download_with_confirm "$FILE_ID"
+            echo "Downloading Google Drive file via gdown (ID: $FILE_ID)..."
+            gdown --id "$FILE_ID" -O source.mp4
           else
-            curl -L -o source.mp4 "$SRC_URL"
+            echo "Downloading standard direct URL..."
+            gdown "$SRC_URL" -O source.mp4 || curl -L -o source.mp4 "$SRC_URL"
           fi
 
+          # Validate that the downloaded file is a valid video
           if [ ! -s source.mp4 ] || file source.mp4 | grep -qi "HTML\|ASCII text"; then
             echo "::error::Downloaded video file is invalid (got an HTML/error page instead of video)."
             exit 1
           fi
-
+          
+          echo "Video successfully downloaded and validated."
       - name: Render Video — Overlay Text & Mix Audio
         run: |
           set -euo pipefail
