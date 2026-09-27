@@ -33,21 +33,11 @@ on:
   repository_dispatch:
     types: [trigger-render]
 
-# NOTE ON AUDIO TRANSPORT
-# --------------------------------------------------------------------------
-# repository_dispatch's client_payload is capped at 64KB by GitHub's API.
-# A base64-encoded MP3 will almost always exceed that, so custom_audio_base64
-# via repository_dispatch should only ever be used for very short/tiny test
-# clips (a few KB). The frontend now uploads real audio files to the repo
-# via the Contents API *before* dispatching, and passes only a file path
-# (audio_file / github_audio_path) in client_payload. This branch is kept
-# for workflow_dispatch (manual runs from the Actions UI) and as a fallback.
-
 jobs:
   render:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # needed to publish the rendered video as a release asset
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -77,9 +67,8 @@ jobs:
           set -euo pipefail
           mkdir -p assets output
 
-          # 1. Resolve Audio Path
           if [ -n "${CUSTOM_AUDIO_B64:-}" ]; then
-            echo "Processing inline Base64 audio (small-clip fallback path)..."
+            echo "Processing inline Base64 audio..."
             if ! echo "$CUSTOM_AUDIO_B64" | base64 -d > assets/uploaded_custom.mp3 2>/tmp/b64err; then
               echo "::error::Failed to decode custom_audio_base64: $(cat /tmp/b64err)"
               exit 1
@@ -100,16 +89,14 @@ jobs:
             fi
           fi
 
-          # Fallback to silent audio if the resolved file is missing/invalid
           if [ -z "${TARGET_PATH:-}" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -v error -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "Audio target '${TARGET_PATH:-<none>}' not found or invalid. Creating fallback silent audio track..."
+            echo "Audio target not found or invalid. Creating fallback silent audio track..."
             TARGET_PATH="assets/silent_fallback.mp3"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
           else
             echo "Using audio track: $TARGET_PATH"
           fi
 
-          # 2. Resolve Text Options
           TITLE_TEXT="${INPUT_TITLE:-${PAYLOAD_TITLE:-Default Title}}"
           VIDEO_URL="${PAYLOAD_URL:-https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u}"
           COLOR="${INPUT_COLOR:-${PAYLOAD_COLOR:-white}}"
@@ -117,10 +104,6 @@ jobs:
           POSITION="${INPUT_POS:-${PAYLOAD_POS:-top}}"
           STYLE="${INPUT_STYLE:-${PAYLOAD_STYLE:-bold}}"
 
-          # Sanitize text overlay for FFmpeg drawtext.
-          # Order matters: escape backslashes FIRST, then colons, then the
-          # closing/opening single-quote sequence. We also render with
-          # `expansion=none` below so literal '%' never needs escaping.
           CLEANED_TITLE=$(printf '%s' "$TITLE_TEXT" \
             | tr '\n' ' ' \
             | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g' -e "s/'/'\\\\''/g")
@@ -133,7 +116,6 @@ jobs:
             Y_POS="50"
           fi
 
-          # Font File and Style Selection
           if [ "$STYLE" = "normal" ]; then
             FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
             EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
@@ -145,7 +127,6 @@ jobs:
             EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
           fi
 
-          # Basic validation so a bad size/color doesn't silently break ffmpeg
           case "$SIZE" in ''|*[!0-9]*) SIZE=48 ;; esac
           case "$COLOR" in ''|*[!a-zA-Z]*) COLOR=white ;; esac
 
@@ -161,37 +142,21 @@ jobs:
       - name: Download Video Source
         run: |
           set -euo pipefail
-          
-          # Install gdown to reliably handle Google Drive files of any size
           pip install --no-cache-dir gdown
 
-          # Extract the file ID from the URL
-          FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
+          echo "Downloading Google Drive file via gdown..."
+          gdown --fuzzy "$SRC_URL" -O source.mp4
 
-          if [ -n "$FILE_ID" ]; then
-            echo "Downloading Google Drive file via gdown (ID: $FILE_ID)..."
-            gdown --id "$FILE_ID" -O source.mp4
-          else
-            echo "Downloading standard direct URL..."
-            gdown "$SRC_URL" -O source.mp4 || curl -L -o source.mp4 "$SRC_URL"
-          fi
-
-          # Validate that the downloaded file is a valid video
           if [ ! -s source.mp4 ] || file source.mp4 | grep -qi "HTML\|ASCII text"; then
             echo "::error::Downloaded video file is invalid (got an HTML/error page instead of video)."
             exit 1
           fi
-          
           echo "Video successfully downloaded and validated."
+
       - name: Render Video — Overlay Text & Mix Audio
         run: |
           set -euo pipefail
-
-          # Robust stream-type detection instead of counting arbitrary
-          # ffprobe text lines.
-          HAS_AUDIO=$(ffprobe -v error -select_streams a \
-            -show_entries stream=index -of csv=p=0 source.mp4 | wc -l)
-
+          HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 source.mp4 | wc -l)
           DRAWTEXT="drawtext=fontfile='${FONT_PATH}':text='${RENDER_TITLE}':expansion=none:fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:${EXTRA_DRAWTEXT}:x=(w-text_w)/2:y=${Y_POSITION}"
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
@@ -223,16 +188,6 @@ jobs:
           path: output/rendered_video.mp4
           retention-days: 7
 
-      # Runs only if the render step above actually succeeded (default GHA
-      # behavior: a step is skipped once an earlier required step fails).
-      # Publishes the *rendered* MP4 as a GitHub Release asset, which gives
-      # us a plain public URL Facebook's crawler can fetch directly —
-      # unlike Actions artifacts (require auth) or Google Drive share
-      # links (often return an HTML interstitial instead of raw bytes).
-      #
-      # This works because the repo is PUBLIC — a private repo would need
-      # a different public host instead (Drive with public permission,
-      # Cloudflare R2, Supabase storage, etc).
       - name: Publish Rendered Video (public link)
         id: publish
         env:
