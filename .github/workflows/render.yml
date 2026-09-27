@@ -2,6 +2,15 @@ name: Render Video
 on:
   repository_dispatch:
     types: [render_video]
+  workflow_dispatch:
+    inputs:
+      audio_file:
+        description: 'Selected background audio filename from assets/'
+        required: false
+      video_title:
+        description: 'Text overlay title'
+        required: false
+        default: 'Sample Title'
 
 permissions:
   contents: write
@@ -10,18 +19,33 @@ jobs:
   render:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for the music asset)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Ensure ffmpeg is present
         run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
 
+      - name: Resolve Inputs
+        run: |
+          AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
+          
+          # If no audio file specified, fallback to first mp3 in assets/
+          if [ -z "$AUDIO_NAME" ]; then
+            AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename)
+          fi
+
+          TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
+          VIDEO_URL="${{ github.event.client_payload.video_url || 'https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u' }}"
+
+          echo "SELECTED_AUDIO=assets/${AUDIO_NAME}" >> $GITHUB_ENV
+          echo "VIDEO_TITLE=${TITLE_TEXT}" >> $GITHUB_ENV
+          echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
+
       - name: Download source video from Google Drive
         run: |
-          URL="${{ github.event.client_payload.video_url }}"
-          FILE_ID=$(echo "$URL" | grep -o 'id=[^&]*' | cut -d= -f2)
+          FILE_ID=$(echo "$SRC_URL" | grep -o 'id=[^&]*' | cut -d= -f2)
           if [ -z "$FILE_ID" ]; then
-            FILE_ID=$(echo "$URL" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
+            FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*\/d\/\([^\/]*\).*/\1/p')
           fi
           curl -L -c /tmp/cookies.txt "https://docs.google.com/uc?export=download&id=${FILE_ID}" > /tmp/confirm.html
           CONFIRM=$(grep -o 'confirm=[^&"]*' /tmp/confirm.html | head -n 1 | cut -d= -f2)
@@ -29,14 +53,13 @@ jobs:
 
       - name: Render — overlay title + mix background music
         run: |
-          TITLE="${{ github.event.client_payload.title }}"
           HAS_AUDIO=$(ffprobe -i source.mp4 -show_streams -select_streams a -loglevel error | wc -l)
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
-            echo "Source video has audio — mixing it with background music"
-            ffmpeg -i source.mp4 -i assets/the_mountain-short-intro-159129.mp3 \
+            echo "Source video has audio — mixing with $SELECTED_AUDIO"
+            ffmpeg -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
-                [0:v]drawtext=text='${TITLE}':fontcolor=white:fontsize=48:
+                [0:v]drawtext=text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
                   box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50:
                   enable='between(t,0,4)'[v];
                 [0:a][1:a]amix=inputs=2:duration=first:weights='1 0.4'[a]
@@ -44,10 +67,10 @@ jobs:
               -map "[v]" -map "[a]" -c:v libx264 -preset fast -c:a aac \
               -shortest output.mp4
           else
-            echo "Source video is silent — using background music as the only audio"
-            ffmpeg -i source.mp4 -i assets/the_mountain-short-intro-159129.mp3 \
+            echo "Source video is silent — using $SELECTED_AUDIO as audio"
+            ffmpeg -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
-                [0:v]drawtext=text='${TITLE}':fontcolor=white:fontsize=48:
+                [0:v]drawtext=text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
                   box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50:
                   enable='between(t,0,4)'[v]
               " \
@@ -71,4 +94,4 @@ jobs:
           curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -H "X-Webhook-Secret: ${{ secrets.WEBHOOK_SECRET }}" \
-            -d "{\"video_url\": \"${ASSET_URL}\", \"title\": \"${{ github.event.client_payload.title }}\"}"
+            -d "{\"video_url\": \"${ASSET_URL}\", \"title\": \"${VIDEO_TITLE}\"}"
