@@ -21,37 +21,41 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      - name: Ensure ffmpeg is present
-        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+      - name: Ensure ffmpeg and fonts are present
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg fonts-dejavu-core
 
       - name: Resolve Inputs
         run: |
           mkdir -p assets
 
-          # 1. Read input audio parameter (works for HTML workflow_dispatch and n8n repository_dispatch)
+          # 1. Read input audio parameter
           AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
           
-          # 2. If no song specified, take the first mp3 in assets/
+          # 2. If no song specified, take the first valid mp3 in assets/
           if [ -z "$AUDIO_NAME" ]; then
             AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename 2>/dev/null)
           fi
 
-          # 3. If selected song doesn't exist, generate a silent fallback audio
-          if [ -z "$AUDIO_NAME" ] || [ ! -f "assets/${AUDIO_NAME}" ]; then
-            echo "Target audio '${AUDIO_NAME}' not found. Creating fallback audio..."
+          # 3. Verify audio file integrity with ffprobe; generate silent fallback if missing or corrupt
+          TARGET_PATH="assets/${AUDIO_NAME}"
+          if [ -z "$AUDIO_NAME" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
+            echo "Selected audio '${AUDIO_NAME}' is missing or invalid. Generating fallback audio..."
             AUDIO_NAME="silent_fallback.mp3"
-            if [ ! -f "assets/silent_fallback.mp3" ]; then
-              ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame assets/silent_fallback.mp3
-            fi
+            TARGET_PATH="assets/silent_fallback.mp3"
+            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
           else
-            echo "Using selected song: assets/${AUDIO_NAME}"
+            echo "Using valid background audio: $TARGET_PATH"
           fi
 
           TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
           VIDEO_URL="${{ github.event.client_payload.video_url || 'https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u' }}"
 
-          echo "SELECTED_AUDIO=assets/${AUDIO_NAME}" >> $GITHUB_ENV
+          echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
           echo "VIDEO_TITLE=${TITLE_TEXT}" >> $GITHUB_ENV
           echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
 
@@ -68,12 +72,13 @@ jobs:
       - name: Render — overlay title + mix background music
         run: |
           HAS_AUDIO=$(ffprobe -i source.mp4 -show_streams -select_streams a -loglevel error | wc -l)
+          FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
             echo "Mixing audio with \"$SELECTED_AUDIO\""
-            ffmpeg -i source.mp4 -i "$SELECTED_AUDIO" \
+            ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
-                [0:v]drawtext=text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
+                [0:v]drawtext=text='${VIDEO_TITLE}':fontfile=${FONT_PATH}:fontcolor=white:fontsize=48:
                   box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50:
                   enable='between(t,0,4)'[v];
                 [0:a][1:a]amix=inputs=2:duration=first:weights='1 0.4'[a]
@@ -82,9 +87,9 @@ jobs:
               -shortest output.mp4
           else
             echo "Using \"$SELECTED_AUDIO\" as primary audio track"
-            ffmpeg -i source.mp4 -i "$SELECTED_AUDIO" \
+            ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
-                [0:v]drawtext=text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
+                [0:v]drawtext=text='${VIDEO_TITLE}':fontfile=${FONT_PATH}:fontcolor=white:fontsize=48:
                   box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50:
                   enable='between(t,0,4)'[v]
               " \
