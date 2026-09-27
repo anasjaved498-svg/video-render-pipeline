@@ -46,6 +46,8 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to publish the rendered video as a release asset
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -237,17 +239,56 @@ jobs:
           path: output/rendered_video.mp4
           retention-days: 7
 
+      # Runs only if the render step above actually succeeded (default GHA
+      # behavior: a step is skipped once an earlier required step fails).
+      # Publishes the *rendered* MP4 as a GitHub Release asset, which gives
+      # us a plain public URL Facebook's crawler can fetch directly —
+      # unlike Actions artifacts (require auth) or Google Drive share
+      # links (often return an HTML interstitial instead of raw bytes).
+      #
+      # This works because the repo is PUBLIC — a private repo would need
+      # a different public host instead (Drive with public permission,
+      # Cloudflare R2, Supabase storage, etc).
+      - name: Publish Rendered Video (public link)
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="render-${{ github.run_id }}-${{ github.run_attempt }}"
+
+          gh release create "$TAG" \
+            output/rendered_video.mp4 \
+            --repo "${{ github.repository }}" \
+            --title "Render ${TAG}" \
+            --notes "Automated render output"
+
+          BROWSER_URL=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[0].browser_download_url')
+
+          if [ -z "$BROWSER_URL" ]; then
+            echo "::error::Could not resolve a public URL for the release asset."
+            exit 1
+          fi
+
+          echo "video_public_url=${BROWSER_URL}" >> "$GITHUB_OUTPUT"
+          echo "Published: ${BROWSER_URL}"
+
       - name: Notify n8n Webhook
         if: always()
         env:
           N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
           N8N_WEBHOOK_SECRET: ${{ secrets.N8N_WEBHOOK_SECRET }}
+          RENDERED_URL: ${{ steps.publish.outputs.video_public_url }}
         run: |
           set -euo pipefail
           STATUS="${{ job.status }}"
           curl -sf -X POST "$N8N_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${N8N_WEBHOOK_SECRET}" \
-            -d "$(jq -n --arg video_url "$SRC_URL" --arg title "${RENDER_TITLE:-}" --arg status "$STATUS" \
-                  '{video_url:$video_url, title:$title, status:$status}')" \
+            -d "$(jq -n \
+                  --arg source_url "$SRC_URL" \
+                  --arg rendered_video_url "${RENDERED_URL:-}" \
+                  --arg title "${RENDER_TITLE:-}" \
+                  --arg status "$STATUS" \
+                  '{source_url:$source_url, rendered_video_url:$rendered_video_url, title:$title, status:$status}')" \
             || echo "::warning::n8n notification failed (render status: $STATUS)"
