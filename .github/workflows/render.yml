@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       audio_file:
-        description: 'Selected MP3 audio file from assets/'
+        description: 'Selected MP3 audio file path'
         required: false
         default: ''
       custom_audio_base64:
@@ -16,11 +16,11 @@ on:
         required: false
         default: 'Default Title'
       text_color:
-        description: 'Text overlay color (white, yellow, red, cyan, green)'
+        description: 'Text overlay color'
         required: false
         default: 'white'
       text_size:
-        description: 'Text font size (36, 48, 64)'
+        description: 'Text font size'
         required: false
         default: '48'
       text_position:
@@ -49,7 +49,7 @@ jobs:
       - name: Resolve Inputs & Setup Parameters
         env:
           INPUT_AUDIO: ${{ inputs.audio_file }}
-          PAYLOAD_AUDIO: ${{ github.event.client_payload.audio_file }}
+          PAYLOAD_AUDIO: ${{ github.event.client_payload.github_audio_path || github.event.client_payload.audio_file }}
           CUSTOM_AUDIO_B64: ${{ inputs.custom_audio_base64 || github.event.client_payload.custom_audio_base64 }}
           INPUT_TITLE: ${{ inputs.video_title }}
           PAYLOAD_TITLE: ${{ github.event.client_payload.title }}
@@ -65,27 +65,36 @@ jobs:
         run: |
           mkdir -p assets output
 
-          # Handle Direct Base64 Audio Upload
+          # 1. Resolve Audio Path
           if [ -n "$CUSTOM_AUDIO_B64" ]; then
-            echo "Processing direct audio upload from HTML interface..."
+            echo "Processing direct Base64 audio upload..."
             echo "$CUSTOM_AUDIO_B64" | base64 -d > assets/uploaded_custom.mp3
             TARGET_PATH="assets/uploaded_custom.mp3"
           else
-            AUDIO_NAME="${INPUT_AUDIO:-$PAYLOAD_AUDIO}"
-            if [ -z "$AUDIO_NAME" ]; then
-              AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename 2>/dev/null)
+            RAW_AUDIO="${INPUT_AUDIO:-$PAYLOAD_AUDIO}"
+            if [ -n "$RAW_AUDIO" ]; then
+              if [ -f "$RAW_AUDIO" ]; then
+                TARGET_PATH="$RAW_AUDIO"
+              elif [ -f "assets/$RAW_AUDIO" ]; then
+                TARGET_PATH="assets/$RAW_AUDIO"
+              else
+                TARGET_PATH="$RAW_AUDIO"
+              fi
+            else
+              TARGET_PATH=$(ls assets/*.mp3 2>/dev/null | head -n 1)
             fi
-            TARGET_PATH="assets/${AUDIO_NAME}"
           fi
 
-          if [ ! -f "$TARGET_PATH" ] || ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "No valid audio selected. Generating 10s fallback silent audio track..."
+          # Fallback to Silent Audio if selected file is missing or corrupt
+          if [ -z "$TARGET_PATH" ] || [ ! -f "$TARGET_PATH" ] \vert{}\vert{} ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
+            echo "Audio target '$TARGET_PATH' not found or invalid. Creating fallback silent audio track..."
             TARGET_PATH="assets/silent_fallback.mp3"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
           else
-            echo "Using background audio track: $TARGET_PATH"
+            echo "Using audio track: $TARGET_PATH"
           fi
 
+          # 2. Resolve Text Options
           TITLE_TEXT="${INPUT_TITLE:-${PAYLOAD_TITLE:-Default Title}}"
           VIDEO_URL="${PAYLOAD_URL:-https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u}"
           COLOR="${INPUT_COLOR:-${PAYLOAD_COLOR:-white}}"
@@ -93,7 +102,7 @@ jobs:
           POSITION="${INPUT_POS:-${PAYLOAD_POS:-top}}"
           STYLE="${INPUT_STYLE:-${PAYLOAD_STYLE:-bold}}"
 
-          # Sanitize Title text for FFmpeg drawtext
+          # Sanitize Text Overlay for FFmpeg drawtext
           ESCAPED_TITLE=$(echo "$TITLE_TEXT" | tr '\n' ' ' | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
 
           if [ "$POSITION" = "center" ]; then
@@ -104,7 +113,7 @@ jobs:
             Y_POS="50"
           fi
 
-          # Font File Selection
+          # Font File and Style Selection
           if [ "$STYLE" = "normal" ]; then
             FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
             EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
@@ -116,6 +125,7 @@ jobs:
             EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
           fi
 
+          # Export variables to GITHUB_ENV
           echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
           echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
           echo "TEXT_COLOR=${COLOR}" >> $GITHUB_ENV
@@ -145,7 +155,7 @@ jobs:
           fi
 
           if [ ! -s source.mp4 ] || file source.mp4 | grep -q "HTML"; then
-            echo "Error: Downloaded file is empty or returned invalid HTML page."
+            echo "Error: Downloaded video file is invalid."
             exit 1
           fi
 
@@ -184,9 +194,8 @@ jobs:
           path: output/rendered_video.mp4
           retention-days: 7
 
-      - name: Notify n8n Webhook (Trigger Workflow 2)
+      - name: Notify n8n Webhook
         run: |
-          echo "Sending rendered video details to n8n Workflow 2..."
           curl -X POST "https://n8n.wadwarehouse.com/webhook/623fd7bf-6f5b-4480-a37d-f047f9255405" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: Tv7bQx2mLp9RkNw4" \
