@@ -1,5 +1,4 @@
 name: Video Render Pipeline
-
 on:
   workflow_dispatch:
     inputs:
@@ -8,7 +7,7 @@ on:
         required: false
         default: ''
       custom_audio_base64:
-        description: 'Base64 encoded custom audio payload'
+        description: 'Base64 encoded custom audio payload (small clips only, see note below)'
         required: false
         default: ''
       video_title:
@@ -33,6 +32,16 @@ on:
         default: 'bold'
   repository_dispatch:
     types: [trigger-render]
+
+# NOTE ON AUDIO TRANSPORT
+# --------------------------------------------------------------------------
+# repository_dispatch's client_payload is capped at 64KB by GitHub's API.
+# A base64-encoded MP3 will almost always exceed that, so custom_audio_base64
+# via repository_dispatch should only ever be used for very short/tiny test
+# clips (a few KB). The frontend now uploads real audio files to the repo
+# via the Contents API *before* dispatching, and passes only a file path
+# (audio_file / github_audio_path) in client_payload. This branch is kept
+# for workflow_dispatch (manual runs from the Actions UI) and as a fallback.
 
 jobs:
   render:
@@ -63,15 +72,19 @@ jobs:
           INPUT_STYLE: ${{ inputs.text_style }}
           PAYLOAD_STYLE: ${{ github.event.client_payload.text_style }}
         run: |
+          set -euo pipefail
           mkdir -p assets output
 
           # 1. Resolve Audio Path
-          if [ -n "$CUSTOM_AUDIO_B64" ]; then
-            echo "Processing direct Base64 audio upload..."
-            echo "$CUSTOM_AUDIO_B64" | base64 -d > assets/uploaded_custom.mp3
+          if [ -n "${CUSTOM_AUDIO_B64:-}" ]; then
+            echo "Processing inline Base64 audio (small-clip fallback path)..."
+            if ! echo "$CUSTOM_AUDIO_B64" | base64 -d > assets/uploaded_custom.mp3 2>/tmp/b64err; then
+              echo "::error::Failed to decode custom_audio_base64: $(cat /tmp/b64err)"
+              exit 1
+            fi
             TARGET_PATH="assets/uploaded_custom.mp3"
           else
-            RAW_AUDIO="${INPUT_AUDIO:-$PAYLOAD_AUDIO}"
+            RAW_AUDIO="${INPUT_AUDIO:-${PAYLOAD_AUDIO:-}}"
             if [ -n "$RAW_AUDIO" ]; then
               if [ -f "$RAW_AUDIO" ]; then
                 TARGET_PATH="$RAW_AUDIO"
@@ -81,13 +94,13 @@ jobs:
                 TARGET_PATH="$RAW_AUDIO"
               fi
             else
-              TARGET_PATH=$(ls assets/*.mp3 2>/dev/null | head -n 1)
+              TARGET_PATH=$(ls assets/*.mp3 2>/dev/null | head -n 1 || true)
             fi
           fi
 
-          # Fallback to Silent Audio if selected file is missing or corrupt
-          if [ -z "$TARGET_PATH" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "Audio target '$TARGET_PATH' not found or invalid. Creating fallback silent audio track..."
+          # Fallback to silent audio if the resolved file is missing/invalid
+          if [ -z "${TARGET_PATH:-}" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -v error -i "$TARGET_PATH" >/dev/null 2>&1; then
+            echo "Audio target '${TARGET_PATH:-<none>}' not found or invalid. Creating fallback silent audio track..."
             TARGET_PATH="assets/silent_fallback.mp3"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
           else
@@ -102,8 +115,13 @@ jobs:
           POSITION="${INPUT_POS:-${PAYLOAD_POS:-top}}"
           STYLE="${INPUT_STYLE:-${PAYLOAD_STYLE:-bold}}"
 
-          # Sanitize Text Overlay for FFmpeg drawtext
-          CLEANED_TITLE=$(echo "$TITLE_TEXT" | tr '\n' ' ' | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
+          # Sanitize text overlay for FFmpeg drawtext.
+          # Order matters: escape backslashes FIRST, then colons, then the
+          # closing/opening single-quote sequence. We also render with
+          # `expansion=none` below so literal '%' never needs escaping.
+          CLEANED_TITLE=$(printf '%s' "$TITLE_TEXT" \
+            | tr '\n' ' ' \
+            | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g' -e "s/'/'\\\\''/g")
 
           if [ "$POSITION" = "center" ]; then
             Y_POS="(h-text_h)/2"
@@ -125,45 +143,75 @@ jobs:
             EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
           fi
 
-          # Export variables to GITHUB_ENV
-          echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
-          echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
-          echo "TEXT_COLOR=${COLOR}" >> $GITHUB_ENV
-          echo "TEXT_SIZE=${SIZE}" >> $GITHUB_ENV
-          echo "Y_POSITION=${Y_POS}" >> $GITHUB_ENV
-          echo "FONT_PATH=${FONT_PATH}" >> $GITHUB_ENV
-          echo "EXTRA_DRAWTEXT=${EXTRA_DRAWTEXT}" >> $GITHUB_ENV
-          echo "RENDER_TITLE=${CLEANED_TITLE}" >> $GITHUB_ENV
+          # Basic validation so a bad size/color doesn't silently break ffmpeg
+          case "$SIZE" in ''|*[!0-9]*) SIZE=48 ;; esac
+          case "$COLOR" in ''|*[!a-zA-Z]*) COLOR=white ;; esac
+
+          echo "SELECTED_AUDIO=${TARGET_PATH}" >> "$GITHUB_ENV"
+          echo "SRC_URL=${VIDEO_URL}" >> "$GITHUB_ENV"
+          echo "TEXT_COLOR=${COLOR}" >> "$GITHUB_ENV"
+          echo "TEXT_SIZE=${SIZE}" >> "$GITHUB_ENV"
+          echo "Y_POSITION=${Y_POS}" >> "$GITHUB_ENV"
+          echo "FONT_PATH=${FONT_PATH}" >> "$GITHUB_ENV"
+          echo "EXTRA_DRAWTEXT=${EXTRA_DRAWTEXT}" >> "$GITHUB_ENV"
+          echo "RENDER_TITLE=${CLEANED_TITLE}" >> "$GITHUB_ENV"
 
       - name: Download Video Source
         run: |
+          set -euo pipefail
           FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
 
-          if [ -n "$FILE_ID" ]; then
-            curl -c /tmp/cookies -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
-            CONFIRM=$(cat /tmp/cookies | grep -i download_warning | awk '{print $7}')
-            if [ -n "$CONFIRM" ]; then
-              curl -Lb /tmp/cookies -o source.mp4 "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}"
-            else
-              curl -L -o source.mp4 "$SRC_URL"
+          download_with_confirm() {
+            local file_id="$1"
+            local cookie_jar
+            cookie_jar=$(mktemp)
+
+            # First pass: hit the page, capture cookies + body
+            curl -sc "$cookie_jar" -L \
+              "https://drive.google.com/uc?export=download&id=${file_id}" \
+              -o /tmp/gdrive_first.html
+
+            # Try to find a confirm token either in the cookie jar (classic
+            # flow) or embedded in the page body (current flow for many
+            # files). Fall back to confirm=t if neither is found.
+            local confirm
+            confirm=$(grep -o 'download_warning[^;]*' "$cookie_jar" | awk '{print $NF}' | head -n1 || true)
+            if [ -z "$confirm" ]; then
+              confirm=$(grep -o 'confirm=[0-9A-Za-z_-]*' /tmp/gdrive_first.html | head -n1 | cut -d= -f2 || true)
             fi
+            confirm="${confirm:-t}"
+
+            curl -sLb "$cookie_jar" -o source.mp4 \
+              "https://drive.google.com/uc?export=download&confirm=${confirm}&id=${file_id}"
+            rm -f "$cookie_jar" /tmp/gdrive_first.html
+          }
+
+          if [ -n "$FILE_ID" ]; then
+            download_with_confirm "$FILE_ID"
           else
             curl -L -o source.mp4 "$SRC_URL"
           fi
 
-          if [ ! -s source.mp4 ] || file source.mp4 | grep -q "HTML"; then
-            echo "Error: Downloaded video file is invalid."
+          if [ ! -s source.mp4 ] || file source.mp4 | grep -qi "HTML\|ASCII text"; then
+            echo "::error::Downloaded video file is invalid (got an HTML/error page instead of video)."
             exit 1
           fi
 
       - name: Render Video — Overlay Text & Mix Audio
         run: |
-          HAS_AUDIO=$(ffprobe -i source.mp4 -show_streams -select_streams a -loglevel error | wc -l)
+          set -euo pipefail
+
+          # Robust stream-type detection instead of counting arbitrary
+          # ffprobe text lines.
+          HAS_AUDIO=$(ffprobe -v error -select_streams a \
+            -show_entries stream=index -of csv=p=0 source.mp4 | wc -l)
+
+          DRAWTEXT="drawtext=fontfile='${FONT_PATH}':text='${RENDER_TITLE}':expansion=none:fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:${EXTRA_DRAWTEXT}:x=(w-text_w)/2:y=${Y_POSITION}"
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
             ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex \
-              "[0:v]drawtext=fontfile='${FONT_PATH}':text='${RENDER_TITLE}':fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:${EXTRA_DRAWTEXT}:x=(w-text_w)/2:y=${Y_POSITION}[v]; \
+              "[0:v]${DRAWTEXT}[v]; \
                [0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1]; \
                [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a2]; \
                [a1][a2]amix=inputs=2:duration=first[aout]" \
@@ -174,7 +222,7 @@ jobs:
           else
             ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex \
-              "[0:v]drawtext=fontfile='${FONT_PATH}':text='${RENDER_TITLE}':fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:${EXTRA_DRAWTEXT}:x=(w-text_w)/2:y=${Y_POSITION}[v]; \
+              "[0:v]${DRAWTEXT}[v]; \
                [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[aout]" \
               -map "[v]" -map "[aout]" \
               -c:v libx264 -preset fast \
@@ -190,8 +238,16 @@ jobs:
           retention-days: 7
 
       - name: Notify n8n Webhook
+        if: always()
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+          N8N_WEBHOOK_SECRET: ${{ secrets.N8N_WEBHOOK_SECRET }}
         run: |
-          curl -X POST "https://n8n.wadwarehouse.com/webhook/623fd7bf-6f5b-4480-a37d-f047f9255405" \
+          set -euo pipefail
+          STATUS="${{ job.status }}"
+          curl -sf -X POST "$N8N_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            -H "x-webhook-secret: Tv7bQx2mLp9RkNw4" \
-            -d "{\"video_url\": \"$SRC_URL\", \"title\": \"$RENDER_TITLE\"}"
+            -H "x-webhook-secret: ${N8N_WEBHOOK_SECRET}" \
+            -d "$(jq -n --arg video_url "$SRC_URL" --arg title "${RENDER_TITLE:-}" --arg status "$STATUS" \
+                  '{video_url:$video_url, title:$title, status:$status}')" \
+            || echo "::warning::n8n notification failed (render status: $STATUS)"
