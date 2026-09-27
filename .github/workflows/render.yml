@@ -20,7 +20,7 @@ jobs:
       - name: Render — overlay title + mix background music
         run: |
           TITLE="${{ github.event.client_payload.title }}"
-          ffmpeg -i source.mp4 -i assets/mixkit-hip-hop-02-738.mp3 \
+             ffmpeg -i source.mp4 -i assets/the_mountain-short-intro-159129.mp3 \
             -filter_complex "
               [0:v]drawtext=text='${TITLE}':fontcolor=white:fontsize=48:
                 box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50:
