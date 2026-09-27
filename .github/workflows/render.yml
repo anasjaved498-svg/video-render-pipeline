@@ -1,0 +1,49 @@
+name: Render Video
+on:
+  repository_dispatch:
+    types: [render_video]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for the music asset)
+        uses: actions/checkout@v4
+
+      - name: Ensure ffmpeg is present
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+
+      - name: Download source video from Google Drive
+        run: |
+          curl -L "${{ github.event.client_payload.video_url }}" -o source.mp4
+
+      - name: Render — overlay title + mix background music
+        run: |
+          TITLE="${{ github.event.client_payload.title }}"
+          ffmpeg -i source.mp4 -i assets/mixkit-hip-hop-02-738.mp3 \
+            -filter_complex "
+              [0:v]drawtext=text='${TITLE}':fontcolor=white:fontsize=48:
+                box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=50:
+                enable='between(t,0,4)'[v];
+              [0:a][1:a]amix=inputs=2:duration=first:weights='1 0.4'[a]
+            " \
+            -map "[v]" -map "[a]" -c:v libx264 -preset fast -c:a aac \
+            -shortest output.mp4
+
+      - name: Upload rendered video as a Release asset
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: render-${{ github.run_id }}
+          files: output.mp4
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Callback to n8n with the public video URL
+        run: |
+          ASSET_URL="https://github.com/${{ github.repository }}/releases/download/render-${{ github.run_id }}/output.mp4"
+          curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Secret: ${{ secrets.WEBHOOK_SECRET }}" \
+            -d "{\"video_url\": \"${ASSET_URL}\", \"title\": \"${{ github.event.client_payload.title }}\"}"
