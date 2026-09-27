@@ -63,7 +63,7 @@ jobs:
           TARGET_PATH="assets/${AUDIO_NAME}"
 
           if [ -z "$AUDIO_NAME" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "No valid audio selected. Generating 10s fallback audio..."
+            echo "No valid audio selected. Generating 10s fallback silent audio track..."
             AUDIO_NAME="silent_fallback.mp3"
             TARGET_PATH="assets/silent_fallback.mp3"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
@@ -77,7 +77,6 @@ jobs:
           SIZE="${INPUT_SIZE:-${PAYLOAD_SIZE:-48}}"
           POSITION="${INPUT_POS:-${PAYLOAD_POS:-top}}"
 
-          # Format string safely for FFmpeg drawtext
           ESCAPED_TITLE=$(echo "$TITLE_TEXT" | tr '\n' ' ' | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
 
           if [ "$POSITION" = "center" ]; then
@@ -100,12 +99,16 @@ jobs:
 
       - name: Download Video Source
         run: |
-          echo "Downloading base video..."
-          FILE_ID="14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u"
-          curl -c /tmp/cookies -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
-          CONFIRM=$(cat /tmp/cookies | grep -i download_warning | awk '{print $7}')
-          if [ -n "$CONFIRM" ]; then
-            curl -Lb /tmp/cookies -o source.mp4 "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}"
+          FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
+
+          if [ -n "$FILE_ID" ]; then
+            curl -c /tmp/cookies -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
+            CONFIRM=$(cat /tmp/cookies | grep -i download_warning | awk '{print $7}')
+            if [ -n "$CONFIRM" ]; then
+              curl -Lb /tmp/cookies -o source.mp4 "https://drive.google.com/uc?export=download&confirm=${CONFIRM}&id=${FILE_ID}"
+            else
+              curl -L -o source.mp4 "$SRC_URL"
+            fi
           else
             curl -L -o source.mp4 "$SRC_URL"
           fi
@@ -121,7 +124,6 @@ jobs:
           FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
-            echo "Mixing base video audio with selected background music..."
             ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
                 [0:v]drawtext=fontfile=${FONT_PATH}:text='${VIDEO_TITLE}':fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:
@@ -131,7 +133,6 @@ jobs:
               -map "[v]" -map "[a]" -c:v libx264 -preset fast -c:a aac \
               -shortest output/rendered_video.mp4
           else
-            echo "Video has no audio track. Setting background music as primary audio..."
             ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
                 [0:v]drawtext=fontfile=${FONT_PATH}:text='${VIDEO_TITLE}':fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:
@@ -147,3 +148,11 @@ jobs:
           name: rendered-video
           path: output/rendered_video.mp4
           retention-days: 7
+
+      - name: Notify n8n Webhook (Trigger Workflow 2)
+        run: |
+          echo "Sending rendered video details to n8n Workflow 2..."
+          curl -X POST "https://n8n.wadwarehouse.com/webhook/623fd7bf-6f5b-4480-a37d-f047f9255405" \
+            -H "Content-Type: application/json" \
+            -H "x-webhook-secret: Tv7bQx2mLp9RkNw4" \
+            -d "{\"video_url\": \"$SRC_URL\", \"title\": \"$VIDEO_TITLE\"}"
