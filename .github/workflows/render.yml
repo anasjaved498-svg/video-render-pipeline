@@ -145,7 +145,13 @@ jobs:
           pip install --no-cache-dir gdown
 
           echo "Downloading Google Drive file via gdown..."
-          gdown --fuzzy "$SRC_URL" -O source.mp4
+          FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
+
+          if [ -n "$FILE_ID" ]; then
+            gdown "https://drive.google.com/uc?id=${FILE_ID}&confirm=t" -O source.mp4
+          else
+            gdown "$SRC_URL" -O source.mp4
+          fi
 
           if [ ! -s source.mp4 ] || file source.mp4 | grep -qi "HTML\|ASCII text"; then
             echo "::error::Downloaded video file is invalid (got an HTML/error page instead of video)."
