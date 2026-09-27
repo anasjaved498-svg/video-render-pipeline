@@ -42,17 +42,14 @@ jobs:
         run: |
           mkdir -p assets output
 
-          # Extract audio input (handles workflow_dispatch and repository_dispatch)
           AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
 
-          # If no audio provided, check if any MP3 exists in assets/
           if [ -z "$AUDIO_NAME" ]; then
             AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename 2>/dev/null)
           fi
 
           TARGET_PATH="assets/${AUDIO_NAME}"
 
-          # Fallback to generating silent audio if no file exists or file is invalid
           if [ -z "$AUDIO_NAME" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -i "$TARGET_PATH" >/dev/null 2>&1; then
             echo "No valid audio selected. Generating 10s fallback audio..."
             AUDIO_NAME="silent_fallback.mp3"
@@ -62,17 +59,15 @@ jobs:
             echo "Using background audio: $TARGET_PATH"
           fi
 
-          # Extract styling parameters
           TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
           VIDEO_URL="${{ github.event.client_payload.video_url || 'https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u' }}"
           COLOR="${{ inputs.text_color || github.event.client_payload.text_color || 'white' }}"
           SIZE="${{ inputs.text_size || github.event.client_payload.text_size || '48' }}"
           POSITION="${{ inputs.text_position || github.event.client_payload.text_position || 'top' }}"
 
-          # Escape title text for FFmpeg filter compatibility
-          ESCAPED_TITLE=$(echo "$TITLE_TEXT" | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
+          # Clean newlines and escape special characters for FFmpeg drawtext
+          ESCAPED_TITLE=$(echo "$TITLE_TEXT" | tr '\n' ' ' | sed "s/'/\\\\'/g" | sed "s/:/\\\\:/g")
 
-          # Calculate vertical text positioning (Y-axis)
           if [ "$POSITION" = "center" ]; then
             Y_POS="(h-text_h)/2"
           elif [ "$POSITION" = "bottom" ]; then
@@ -81,13 +76,16 @@ jobs:
             Y_POS="50"
           fi
 
-          # Export variables to GitHub Environment
+          # Safe multi-line string writing to GITHUB_ENV
           echo "SELECTED_AUDIO=${TARGET_PATH}" >> $GITHUB_ENV
-          echo "VIDEO_TITLE=${ESCAPED_TITLE}" >> $GITHUB_ENV
           echo "SRC_URL=${VIDEO_URL}" >> $GITHUB_ENV
           echo "TEXT_COLOR=${COLOR}" >> $GITHUB_ENV
           echo "TEXT_SIZE=${SIZE}" >> $GITHUB_ENV
           echo "Y_POSITION=${Y_POS}" >> $GITHUB_ENV
+
+          echo "VIDEO_TITLE<<EOF" >> $GITHUB_ENV
+          echo "$ESCAPED_TITLE" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Download Video Source
         run: |
@@ -103,13 +101,6 @@ jobs:
         run: |
           HAS_AUDIO=$(ffprobe -i source.mp4 -show_streams -select_streams a -loglevel error | wc -l)
           FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-
-          echo "Rendering with options:"
-          echo "  - Title: $VIDEO_TITLE"
-          echo "  - Text Color: $TEXT_COLOR"
-          echo "  - Font Size: $TEXT_SIZE"
-          echo "  - Position Y: $Y_POSITION"
-          echo "  - Audio Track: $SELECTED_AUDIO"
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
             echo "Mixing base video audio with selected background music..."
