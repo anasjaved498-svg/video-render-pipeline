@@ -27,21 +27,25 @@ jobs:
 
       - name: Resolve Inputs
         run: |
-          AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
-          
-          # If no audio file specified, fallback to first mp3 in assets/
-          if [ -z "$AUDIO_NAME" ]; then
-            AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename)
-          fi
-
           mkdir -p assets
 
-          # If target audio file still does not exist, generate fallback silent audio
+          # 1. Read input audio parameter (works for HTML workflow_dispatch and n8n repository_dispatch)
+          AUDIO_NAME="${{ inputs.audio_file || github.event.client_payload.audio_file }}"
+          
+          # 2. If no song specified, take the first mp3 in assets/
+          if [ -z "$AUDIO_NAME" ]; then
+            AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename 2>/dev/null)
+          fi
+
+          # 3. If selected song doesn't exist, generate a silent fallback audio
           if [ -z "$AUDIO_NAME" ] || [ ! -f "assets/${AUDIO_NAME}" ]; then
+            echo "Target audio '${AUDIO_NAME}' not found. Creating fallback audio..."
             AUDIO_NAME="silent_fallback.mp3"
             if [ ! -f "assets/silent_fallback.mp3" ]; then
               ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame assets/silent_fallback.mp3
             fi
+          else
+            echo "Using selected song: assets/${AUDIO_NAME}"
           fi
 
           TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
@@ -66,7 +70,7 @@ jobs:
           HAS_AUDIO=$(ffprobe -i source.mp4 -show_streams -select_streams a -loglevel error | wc -l)
 
           if [ "$HAS_AUDIO" -gt 0 ]; then
-            echo "Source video has audio — mixing with $SELECTED_AUDIO"
+            echo "Mixing audio with \"$SELECTED_AUDIO\""
             ffmpeg -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
                 [0:v]drawtext=text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
@@ -77,7 +81,7 @@ jobs:
               -map "[v]" -map "[a]" -c:v libx264 -preset fast -c:a aac \
               -shortest output.mp4
           else
-            echo "Source video is silent — using $SELECTED_AUDIO as audio"
+            echo "Using \"$SELECTED_AUDIO\" as primary audio track"
             ffmpeg -i source.mp4 -i "$SELECTED_AUDIO" \
               -filter_complex "
                 [0:v]drawtext=text='${VIDEO_TITLE}':fontcolor=white:fontsize=48:
