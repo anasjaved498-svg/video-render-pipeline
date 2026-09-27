@@ -34,6 +34,16 @@ jobs:
             AUDIO_NAME=$(ls assets/*.mp3 2>/dev/null | head -n 1 | xargs -n 1 basename)
           fi
 
+          mkdir -p assets
+
+          # If target audio file still does not exist, generate fallback silent audio
+          if [ -z "$AUDIO_NAME" ] || [ ! -f "assets/${AUDIO_NAME}" ]; then
+            AUDIO_NAME="silent_fallback.mp3"
+            if [ ! -f "assets/silent_fallback.mp3" ]; then
+              ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame assets/silent_fallback.mp3
+            fi
+          fi
+
           TITLE_TEXT="${{ inputs.video_title || github.event.client_payload.title || 'Default Title' }}"
           VIDEO_URL="${{ github.event.client_payload.video_url || 'https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u' }}"
 
