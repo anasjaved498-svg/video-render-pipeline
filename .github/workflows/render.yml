@@ -50,20 +50,16 @@ jobs:
           AUDIO_URL: ${{ github.event.client_payload.audio_url || github.event.inputs.audio_url }}
         run: |
           echo "Downloading source video..."
-          # Save cookies and download initial response
           curl -c ./cookie -s -L "$VIDEO_URL" -o input_video.mp4
           
-          # Check if Google Drive returned a virus scan warning page for large files
           if grep -q "Google Drive - Virus scan warning" input_video.mp4 || grep -q "html" input_video.mp4; then
             echo "Large file virus warning encountered. Bypassing Google Drive confirmation..."
             FILE_ID=$(echo "$VIDEO_URL" | grep -oP 'id=\K[^&]+')
             curl -Lb ./cookie "https://drive.google.com/uc?export=download&confirm=t&id=$FILE_ID" -o input_video.mp4
           fi
 
-          # Verify file type to ensure it's a valid video
           file input_video.mp4
 
-          # Check if background music was provided
           if [ -n "$AUDIO_URL" ]; then
             echo "Downloading background music..."
             curl -L "$AUDIO_URL" -o background_audio.mp3
@@ -90,6 +86,7 @@ jobs:
         run: |
           curl -X POST "https://n8n.wadwarehouse.com/webhook/623fd7bf-6f5b-4480-a37d-f047f9255405" \
           -H "Content-Type: application/json" \
+          -H "X-Webhook-Secret: MySecretKey_2026_xyz789" \
           -d '{
             "status": "success",
             "rendered_video_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
