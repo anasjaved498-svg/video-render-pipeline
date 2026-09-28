@@ -37,10 +37,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg & Utilities
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg curl grep
 
       - name: Process and Render Video with FFmpeg
         env:
@@ -50,7 +50,18 @@ jobs:
           AUDIO_URL: ${{ github.event.client_payload.audio_url || github.event.inputs.audio_url }}
         run: |
           echo "Downloading source video..."
-          curl -L "$VIDEO_URL" -o input_video.mp4
+          # Save cookies and download initial response
+          curl -c ./cookie -s -L "$VIDEO_URL" -o input_video.mp4
+          
+          # Check if Google Drive returned a virus scan warning page for large files
+          if grep -q "Google Drive - Virus scan warning" input_video.mp4 || grep -q "html" input_video.mp4; then
+            echo "Large file virus warning encountered. Bypassing Google Drive confirmation..."
+            FILE_ID=$(echo "$VIDEO_URL" | grep -oP 'id=\K[^&]+')
+            curl -Lb ./cookie "https://drive.google.com/uc?export=download&confirm=t&id=$FILE_ID" -o input_video.mp4
+          fi
+
+          # Verify file type to ensure it's a valid video
+          file input_video.mp4
 
           # Check if background music was provided
           if [ -n "$AUDIO_URL" ]; then
@@ -58,7 +69,6 @@ jobs:
             curl -L "$AUDIO_URL" -o background_audio.mp3
             
             echo "Rendering video with text overlay and background music..."
-            # Combines video, adds text overlay, replaces audio with background music
             ffmpeg -i input_video.mp4 -i background_audio.mp3 \
               -filter_complex "[0:v]drawtext=text='$TITLE':fontcolor=$TEXT_COLOR:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2[v]" \
               -map "[v]" -map "1:a" -shortest -c:v libx264 -c:a aac output_rendered.mp4
@@ -69,7 +79,7 @@ jobs:
               -c:v libx264 -c:a copy output_rendered.mp4
           fi
 
-      - name: Upload Rendered Video as GitHub Artifact (or host it)
+      - name: Upload Rendered Video as GitHub Artifact
         uses: actions/upload-artifact@v4
         with:
           name: rendered-video
