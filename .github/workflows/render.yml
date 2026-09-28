@@ -2,7 +2,7 @@ name: Video Render Pipeline
 
 on:
   repository_dispatch:
-    types: [trigger-render]
+    types: [render-video]
   workflow_dispatch:
     inputs:
       video_url:
