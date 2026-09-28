@@ -34,6 +34,8 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write  # Required to create GitHub Releases and upload assets
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -53,48 +55,46 @@ jobs:
           echo "Downloading source video..."
           curl -c ./cookie -s -L "$VIDEO_URL" -o input_video.mp4
           
-          # Robust bypass for Google Drive virus scan warning / HTML pages on large files
           if grep -q "html" input_video.mp4 || grep -q "Virus scan warning" input_video.mp4; then
             echo "Large file warning detected. Extracting File ID and bypassing..."
             FILE_ID=$(echo "$VIDEO_URL" | grep -oP 'id=\K[^&]+')
             curl -Lb ./cookie "https://drive.google.com/uc?export=download&confirm=t&id=$FILE_ID" -o input_video.mp4
           fi
 
-          # Verify file type to ensure it's a valid video
-          file input_video.mp4
-
-          # Check if background music was provided
           if [ -n "$AUDIO_URL" ]; then
             echo "Downloading background music..."
             curl -L "$AUDIO_URL" -o background_audio.mp3
             
-            echo "Rendering video with text overlay and background music..."
             ffmpeg -i input_video.mp4 -i background_audio.mp3 \
               -filter_complex "[0:v]drawtext=text='$TITLE':fontcolor=$TEXT_COLOR:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2[v]" \
               -map "[v]" -map "1:a" -shortest -c:v libx264 -preset fast -c:a aac output_rendered.mp4
           else
-            echo "Rendering video with text overlay only (original audio)..."
             ffmpeg -i input_video.mp4 \
               -vf "drawtext=text='$TITLE':fontcolor=$TEXT_COLOR:fontsize=48:x=(w-text_w)/2:y=(h-text_h)/2" \
               -c:v libx264 -preset fast -c:a copy output_rendered.mp4
           fi
 
-      - name: Upload Rendered Video as GitHub Artifact
-        uses: actions/upload-artifact@v4
+      - name: Create Release and Upload Video Asset
+        id: create_release
+        uses: softprops/action-gh-release@v2
         with:
-          name: rendered-video
-          path: output_rendered.mp4
+          tag_name: run-${{ github.run_number }}
+          name: "Rendered Video Run #${{ github.run_number }}"
+          files: output_rendered.mp4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Send Completion Webhook to n8n
         if: always()
         run: |
+          DIRECT_URL="https://github.com/${{ github.repository }}/releases/download/run-${{ github.run_number }}/output_rendered.mp4"
           curl -X POST "https://n8n.wadwarehouse.com/webhook/623fd7bf-6f5b-4480-a37d-f047f9255405" \
           -H "Content-Type: application/json" \
           -H "X-Webhook-Secret: MySecretKey_2026_xyz789" \
-          -d '{
-            "status": "success",
-            "rendered_video_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-            "title": "${{ github.event.client_payload.title || github.event.inputs.title }}",
-            "hashtags": "${{ github.event.client_payload.hashtags || github.event.inputs.hashtags }}",
-            "source_url": "${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
-          }'
+          -d "{
+            \"status\": \"success\",
+            \"rendered_video_url\": \"$DIRECT_URL\",
+            \"title\": \"${{ github.event.client_payload.title || github.event.inputs.title }}\",
+            \"hashtags\": \"${{ github.event.client_payload.hashtags || github.event.inputs.hashtags }}\",
+            \"source_url\": \"${{ github.event.client_payload.video_url || github.event.inputs.video_url }}\"
+          }"
