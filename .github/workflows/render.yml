@@ -43,23 +43,20 @@ jobs:
       - name: Install FFmpeg & Utilities
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl wget grep fontconfig
+          sudo apt-get install -y ffmpeg curl wget grep fontconfig python3-pip
 
       - name: Download source video safely
         run: |
           URL="${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
-          # Extract file ID from URL
-          FILE_ID=$(echo "$URL" | grep -oP 'id=\K[\w-]+')
+          echo "Installing gdown..."
+          pip install gdown --break-system-packages
           
-          if [ -z "$FILE_ID" ]; then
-            # Fallback extraction if format differs
-            FILE_ID=$(echo "$URL" | grep -oP '/file/d/\K[\w-]+')
-          fi
-
-          echo "Downloading file ID: $FILE_ID"
+          echo "Downloading file from Google Drive..."
+          gdown --fuzzy "$URL" -O input_video.mp4
           
-          # Use wget with cookie jar to handle Google Drive large file virus warning check automatically
-          wget --load-cookies /tmp/cookies.txt "https://docs.google.com/uc?export=download&confirm=$(wget --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id='${FILE_ID} -qO- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=${FILE_ID}" -O input_video.mp4
+          # Verify downloaded file details
+          ls -lh input_video.mp4
+          file input_video.mp4
 
       - name: Process and Render Video with FFmpeg
         env:
