@@ -52,7 +52,7 @@ jobs:
           pip install gdown --break-system-packages
           
           echo "Downloading file from Google Drive..."
-          gdown --fuzzy "$URL" -O input_video.mp4
+          gdown "$URL" -O input_video.mp4
           
           # Verify downloaded file details
           ls -lh input_video.mp4
