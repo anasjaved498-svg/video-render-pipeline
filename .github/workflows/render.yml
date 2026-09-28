@@ -45,28 +45,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg curl wget grep fontconfig python3-pip
 
-      - name: Download source video safely
+      - name: Download source video with gdown
         run: |
           URL="${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
           
-          # Extract the file ID from the Google Drive URL
-          FILE_ID=$(echo "$URL" | grep -oP '(?<=/d/)[^/]+' || echo "$URL" | grep -oP '(?<=id=)[^&]+')
-          echo "Extracted File ID: $FILE_ID"
+          echo "Installing gdown..."
+          pip install gdown --break-system-packages
           
-          echo "Downloading file directly from Google Drive..."
-          curl -c ./cookie -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
+          echo "Downloading video securely from Google Drive..."
+          gdown "$URL" -O input_video.mp4
           
-          # Extract confirmation token if large file warning triggers
-          CODE="$(awk '/_warning_/ {print $NF}' ./cookie)"
-          
-          if [ -n "$CODE" ]; then
-            echo "Large file warning detected. Bypassing with confirmation code..."
-            curl -Lb ./cookie "https://drive.google.com/uc?export=download&confirm=${CODE}&id=${FILE_ID}" -o input_video.mp4
-          else
-            curl -Lb ./cookie "https://drive.google.com/uc?export=download&id=${FILE_ID}" -o input_video.mp4
-          fi
-          
-          # Verify file downloaded correctly
+          # Verify downloaded file is a valid video
           ls -lh input_video.mp4
           file input_video.mp4
 
