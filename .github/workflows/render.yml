@@ -1,239 +1,74 @@
 name: Video Render Pipeline
+
 on:
-  workflow_dispatch:
-    inputs:
-      audio_file:
-        description: 'Selected MP3 audio file path'
-        required: false
-        default: ''
-      custom_audio_base64:
-        description: 'Base64 encoded custom audio (small clips only)'
-        required: false
-        default: ''
-      video_title:
-        description: 'Text title overlay for the video'
-        required: false
-        default: 'Default Title'
-      text_color:
-        description: 'white, yellow, orange, red, pink, purple, cyan, green'
-        required: false
-        default: 'white'
-      text_size:
-        description: 'Font size (36, 48, 64)'
-        required: false
-        default: '48'
-      text_position:
-        description: 'top, center, bottom'
-        required: false
-        default: 'top'
-      text_style:
-        description: 'normal, bold, outline'
-        required: false
-        default: 'bold'
   repository_dispatch:
     types: [trigger-render]
 
 jobs:
-  render:
+  render-video:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg & Tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg curl jq file fonts-dejavu-core
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Resolve Inputs & Setup Parameters
-        env:
-          INPUT_AUDIO: ${{ inputs.audio_file }}
-          PAYLOAD_AUDIO: ${{ github.event.client_payload.github_audio_path || github.event.client_payload.audio_file }}
-          CUSTOM_AUDIO_B64: ${{ inputs.custom_audio_base64 || github.event.client_payload.custom_audio_base64 }}
-          INPUT_TITLE: ${{ inputs.video_title }}
-          PAYLOAD_TITLE: ${{ github.event.client_payload.title }}
-          PAYLOAD_URL: ${{ github.event.client_payload.video_url }}
-          INPUT_COLOR: ${{ inputs.text_color }}
-          PAYLOAD_COLOR: ${{ github.event.client_payload.text_color }}
-          INPUT_SIZE: ${{ inputs.text_size }}
-          PAYLOAD_SIZE: ${{ github.event.client_payload.text_size }}
-          INPUT_POS: ${{ inputs.text_position }}
-          PAYLOAD_POS: ${{ github.event.client_payload.text_position }}
-          INPUT_STYLE: ${{ inputs.text_style }}
-          PAYLOAD_STYLE: ${{ github.event.client_payload.text_style }}
+      - name: Download Source Video & Audio Track
         run: |
-          set -euo pipefail
-          mkdir -p assets output
-
-          # ---- Audio selection ----
-          if [ -n "${CUSTOM_AUDIO_B64:-}" ]; then
-            if ! echo "$CUSTOM_AUDIO_B64" | base64 -d > assets/uploaded_custom.mp3 2>/tmp/b64err; then
-              echo "::error::Failed to decode custom_audio_base64: $(cat /tmp/b64err)"
-              exit 1
-            fi
-            TARGET_PATH="assets/uploaded_custom.mp3"
+          curl -L "${{ github.event.client_payload.video_url }}" -o input_video.mp4
+          
+          AUDIO_URL="${{ github.event.client_payload.audio_url }}"
+          if [ -n "$AUDIO_URL" ]; then
+            curl -L "$AUDIO_URL" -o background_music.mp3
+            HAS_AUDIO=true
           else
-            RAW_AUDIO="${INPUT_AUDIO:-${PAYLOAD_AUDIO:-}}"
-            if [ -n "$RAW_AUDIO" ]; then
-              if [ -f "$RAW_AUDIO" ]; then TARGET_PATH="$RAW_AUDIO"
-              elif [ -f "assets/$RAW_AUDIO" ]; then TARGET_PATH="assets/$RAW_AUDIO"
-              else TARGET_PATH="$RAW_AUDIO"; fi
-            else
-              TARGET_PATH=$(ls assets/*.mp3 2>/dev/null | head -n 1 || true)
-            fi
+            HAS_AUDIO=false
           fi
+          echo "HAS_AUDIO=$HAS_AUDIO" >> $GITHUB_ENV
 
-          if [ -z "${TARGET_PATH:-}" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -v error -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "Audio not found/invalid. Using silent fallback track."
-            TARGET_PATH="assets/silent_fallback.mp3"
-            ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
-          fi
-          echo "Using audio: $TARGET_PATH"
-
-          # ---- Text settings (whitelisted so nothing unexpected reaches ffmpeg) ----
-          TITLE_TEXT="${INPUT_TITLE:-${PAYLOAD_TITLE:-Default Title}}"
-          VIDEO_URL="${PAYLOAD_URL:-https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u}"
-          VIDEO_URL=$(printf '%s' "$VIDEO_URL" | tr -d '\n\r')
-
-          case "${INPUT_COLOR:-${PAYLOAD_COLOR:-white}}" in
-            yellow) HEX=0xfacc15 ;; orange) HEX=0xfb923c ;; red) HEX=0xf87171 ;;
-            pink) HEX=0xf472b6 ;; purple) HEX=0xc084fc ;; cyan) HEX=0x22d3ee ;;
-            green) HEX=0x4ade80 ;; *) HEX=0xffffff ;;
-          esac
-          case "${INPUT_POS:-${PAYLOAD_POS:-top}}" in center) POS=center ;; bottom) POS=bottom ;; *) POS=top ;; esac
-          case "${INPUT_STYLE:-${PAYLOAD_STYLE:-bold}}" in normal) STYLE=normal ;; outline) STYLE=outline ;; *) STYLE=bold ;; esac
-          SIZE="${INPUT_SIZE:-${PAYLOAD_SIZE:-48}}"
-          case "$SIZE" in ''|*[!0-9]*) SIZE=48 ;; esac
-
-          # Raw title saved to a file: avoids all ffmpeg escaping problems
-          printf '%s' "$TITLE_TEXT" | tr '\n\r' '  ' > title_raw.txt
-
-          {
-            echo "SELECTED_AUDIO=${TARGET_PATH}"
-            echo "SRC_URL=${VIDEO_URL}"
-            echo "TEXT_COLOR=${HEX}"
-            echo "TEXT_SIZE=${SIZE}"
-            echo "TEXT_POS=${POS}"
-            echo "TEXT_STYLE=${STYLE}"
-          } >> "$GITHUB_ENV"
-
-      - name: Download Video Source
+      - name: Process Video with FFmpeg & Custom Styling
         run: |
-          set -euo pipefail
-          python3 -m pip install --quiet --no-cache-dir --break-system-packages gdown
-
-          FILE_ID=$(echo "$SRC_URL" | sed -nE 's#.*(id=|/d/)([a-zA-Z0-9_-]+).*#\2#p' | head -n 1)
-          if [ -n "$FILE_ID" ]; then
-            gdown "https://drive.google.com/uc?id=${FILE_ID}&confirm=t" -O source.mp4
+          TITLE="${{ github.event.client_payload.title }}"
+          if [ -z "$TITLE" ]; then TITLE="Rendered Video"; fi
+          
+          COLOR="${{ github.event.client_payload.text_color }}"
+          if [ -z "$COLOR" ]; then COLOR="#ffffff"; fi
+          # Convert hex color code to FFmpeg format if needed, default white
+          
+          FONT_STYLE="${{ github.event.client_payload.font_style }}"
+          
+          # Check if background audio was selected and merge tracks
+          if [ "$HAS_AUDIO" = "true" ]; then
+            ffmpeg -i input_video.mp4 -i background_music.mp3 \
+              -filter_complex "[0:v]drawtext=text='$TITLE':fontcolor=$COLOR:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=6:x=(w-text_w)/2:y=h-th-30[v];[0:a]volume=0.2[a0];[1:a]volume=1.0[a1];[a0][a1]amix=inputs=2:duration=first[a]" \
+              -map "[v]" -map "[a]" -c:v libx264 -c:a aac output_video.mp4
           else
-            gdown "$SRC_URL" -O source.mp4
+            ffmpeg -i input_video.mp4 \
+              -vf "drawtext=text='$TITLE':fontcolor=$COLOR:fontsize=28:box=1:boxcolor=black@0.6:boxborderw=6:x=(w-text_w)/2:y=h-th-30" \
+              -codec:a copy output_video.mp4
           fi
 
-          if [ ! -s source.mp4 ] || file source.mp4 | grep -qi "HTML\|ASCII text"; then
-            echo "::error::Downloaded video is invalid (got an HTML/error page). Is the Drive file shared as 'anyone with the link'?"
-            exit 1
-          fi
-
-      - name: Render Video — Overlay Text & Mix Audio
-        run: |
-          set -euo pipefail
-
-          # Scale everything to the video so 48px looks the same on 1080p or 4K
-          W=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 source.mp4)
-          H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 source.mp4)
-          REF=$(( W < H ? W : H ))
-          FS=$(( TEXT_SIZE * REF / 1080 )); [ "$FS" -lt 12 ] && FS=12
-          MARG=$(( 50 * REF / 1080 )); PAD=$(( 10 * REF / 1080 )); BW=$(( 4 * REF / 1080 ))
-          [ "$BW" -lt 1 ] && BW=1
-
-          # Wrap long titles so they never run off the screen
-          CPL=$(( REF * 3 / (FS * 2) )); [ "$CPL" -lt 10 ] && CPL=10
-          fold -s -w "$CPL" title_raw.txt > title.txt
-
-          case "$TEXT_POS" in
-            center) Y="(h-text_h)/2" ;;
-            bottom) Y="h-text_h-${MARG}" ;;
-            *) Y="${MARG}" ;;
-          esac
-
-          BOLD=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-          REG=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
-          case "$TEXT_STYLE" in
-            normal)  FONT=$REG;  EXTRA="box=1:boxcolor=black@0.5:boxborderw=${PAD}" ;;
-            outline) FONT=$BOLD; EXTRA="borderw=${BW}:bordercolor=black" ;;
-            *)       FONT=$BOLD; EXTRA="box=1:boxcolor=black@0.5:boxborderw=${PAD}" ;;
-          esac
-
-          DRAWTEXT="drawtext=fontfile=${FONT}:textfile=title.txt:expansion=none:fontcolor=${TEXT_COLOR}:fontsize=${FS}:${EXTRA}:x=(w-text_w)/2:y=${Y}"
-          HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 source.mp4 | wc -l)
-
-          # Music is looped (-stream_loop) so a short track never cuts the video short
-          if [ "$HAS_AUDIO" -gt 0 ]; then
-            ffmpeg -y -i source.mp4 -stream_loop -1 -i "$SELECTED_AUDIO" \
-              -filter_complex \
-              "[0:v]${DRAWTEXT}[v]; \
-               [0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1]; \
-               [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.4[a2]; \
-               [a1][a2]amix=inputs=2:duration=first[aout]" \
-              -map "[v]" -map "[aout]" \
-              -c:v libx264 -preset fast -c:a aac -b:a 192k -ar 44100 -ac 2 \
-              -shortest output/rendered_video.mp4
-          else
-            ffmpeg -y -i source.mp4 -stream_loop -1 -i "$SELECTED_AUDIO" \
-              -filter_complex \
-              "[0:v]${DRAWTEXT}[v]; \
-               [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[aout]" \
-              -map "[v]" -map "[aout]" \
-              -c:v libx264 -preset fast -c:a aac -b:a 192k -ar 44100 -ac 2 \
-              -shortest output/rendered_video.mp4
-          fi
-
-      - name: Upload Output Video Artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release & Upload Asset
+        id: create_release
+        uses: softprops/action-gh-release@v1
         with:
-          name: rendered-video
-          path: output/rendered_video.mp4
-          retention-days: 7
-
-      - name: Publish Rendered Video (public link)
-        id: publish
+          tag_name: render-${{ github.run_number }}
+          files: output_video.mp4
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Trigger n8n Webhook Completion
         run: |
-          set -euo pipefail
-          TAG="render-${{ github.run_id }}-${{ github.run_attempt }}"
-
-          gh release create "$TAG" output/rendered_video.mp4 \
-            --repo "${{ github.repository }}" \
-            --title "Render ${TAG}" \
-            --notes "Automated render output"
-
-          BROWSER_URL=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[0].browser_download_url')
-          if [ -z "$BROWSER_URL" ]; then
-            echo "::error::Could not resolve a public URL for the release asset."
-            exit 1
-          fi
-          echo "video_public_url=${BROWSER_URL}" >> "$GITHUB_OUTPUT"
-          echo "Published: ${BROWSER_URL}"
-
-      - name: Notify n8n Webhook
-        if: always()
-        env:
-          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
-          N8N_WEBHOOK_SECRET: ${{ secrets.N8N_WEBHOOK_SECRET }}
-          RENDERED_URL: ${{ steps.publish.outputs.video_public_url }}
-        run: |
-          STATUS="${{ job.status }}"
-          CLEAN_TITLE=$(cat title_raw.txt 2>/dev/null || true)
-          curl -sf -X POST "$N8N_WEBHOOK_URL" \
+          RENDERED_URL="https://github.com/${{ github.repository }}/releases/download/render-${{ github.run_number }}/output_video.mp4"
+          
+          curl -X POST "${{ secrets.N8N_COMPLETION_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -H "x-webhook-secret: ${N8N_WEBHOOK_SECRET}" \
-            -d "$(jq -n \
-                  --arg source_url "${SRC_URL:-}" \
-                  --arg rendered_video_url "${RENDERED_URL:-}" \
-                  --arg title "$CLEAN_TITLE" \
-                  --arg status "$STATUS" \
-                  '{source_url:$source_url, rendered_video_url:$rendered_video_url, title:$title, status:$status}')" \
-            || echo "::warning::n8n notification failed (render status: $STATUS). Check the N8N_WEBHOOK_SECRET secret matches n8n."
+            -H "X-Webhook-Secret: MySecretKey_2026_xyz789" \
+            -d "{
+              \"status\": \"success\",
+              \"rendered_video_url\": \"$RENDERED_URL\",
+              \"title\": \"${{ github.event.client_payload.title }}\",
+              \"hashtags\": \"${{ github.event.client_payload.hashtags }}\",
+              \"source_url\": \"${{ github.event.client_payload.video_url }}\"
+            }"
