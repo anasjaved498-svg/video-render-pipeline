@@ -43,25 +43,31 @@ jobs:
       - name: Install FFmpeg & Utilities
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl grep fontconfig
+          sudo apt-get install -y ffmpeg curl wget grep fontconfig
+
+      - name: Download source video safely
+        run: |
+          URL="${{ github.event.client_payload.video_url || github.event.inputs.video_url }}"
+          # Extract file ID from URL
+          FILE_ID=$(echo "$URL" | grep -oP 'id=\K[\w-]+')
+          
+          if [ -z "$FILE_ID" ]; then
+            # Fallback extraction if format differs
+            FILE_ID=$(echo "$URL" | grep -oP '/file/d/\K[\w-]+')
+          fi
+
+          echo "Downloading file ID: $FILE_ID"
+          
+          # Use wget with cookie jar to handle Google Drive large file virus warning check automatically
+          wget --load-cookies /tmp/cookies.txt "https://docs.google.com/uc?export=download&confirm=$(wget --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://docs.google.com/uc?export=download&id='${FILE_ID} -qO- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=${FILE_ID}" -O input_video.mp4
 
       - name: Process and Render Video with FFmpeg
         env:
-          VIDEO_URL: ${{ github.event.client_payload.video_url || github.event.inputs.video_url }}
           TITLE: ${{ github.event.client_payload.title || github.event.inputs.title }}
           TEXT_COLOR: ${{ github.event.client_payload.text_color || github.event.inputs.text_color }}
           FONT_STYLE: ${{ github.event.client_payload.font_style || github.event.inputs.font_style }}
           AUDIO_URL: ${{ github.event.client_payload.audio_url || github.event.inputs.audio_url }}
         run: |
-          echo "Downloading source video..."
-          curl -c ./cookie -s -L "$VIDEO_URL" -o input_video.mp4
-          
-          if grep -q "html" input_video.mp4 || grep -q "Virus scan warning" input_video.mp4; then
-            echo "Large file warning detected. Extracting File ID and bypassing..."
-            FILE_ID=$(echo "$VIDEO_URL" | grep -oP 'id=\K[^&]+')
-            curl -Lb ./cookie "https://drive.google.com/uc?export=download&confirm=t&id=$FILE_ID" -o input_video.mp4
-          fi
-
           # Map specific standard font names safely
           FONT_NAME="Sans"
           if [ "$FONT_STYLE" = "Impact" ]; then FONT_NAME="Impact"; fi
