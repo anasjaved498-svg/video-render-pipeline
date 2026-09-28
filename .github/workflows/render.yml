@@ -7,7 +7,7 @@ on:
         required: false
         default: ''
       custom_audio_base64:
-        description: 'Base64 encoded custom audio payload (small clips only, see note below)'
+        description: 'Base64 encoded custom audio (small clips only)'
         required: false
         default: ''
       video_title:
@@ -15,19 +15,19 @@ on:
         required: false
         default: 'Default Title'
       text_color:
-        description: 'Text overlay color'
+        description: 'white, yellow, orange, red, pink, purple, cyan, green'
         required: false
         default: 'white'
       text_size:
-        description: 'Text font size'
+        description: 'Font size (36, 48, 64)'
         required: false
         default: '48'
       text_position:
-        description: 'Text position (top, center, bottom)'
+        description: 'top, center, bottom'
         required: false
         default: 'top'
       text_style:
-        description: 'Text style (normal, bold, outline)'
+        description: 'normal, bold, outline'
         required: false
         default: 'bold'
   repository_dispatch:
@@ -67,8 +67,8 @@ jobs:
           set -euo pipefail
           mkdir -p assets output
 
+          # ---- Audio selection ----
           if [ -n "${CUSTOM_AUDIO_B64:-}" ]; then
-            echo "Processing inline Base64 audio..."
             if ! echo "$CUSTOM_AUDIO_B64" | base64 -d > assets/uploaded_custom.mp3 2>/tmp/b64err; then
               echo "::error::Failed to decode custom_audio_base64: $(cat /tmp/b64err)"
               exit 1
@@ -77,76 +77,54 @@ jobs:
           else
             RAW_AUDIO="${INPUT_AUDIO:-${PAYLOAD_AUDIO:-}}"
             if [ -n "$RAW_AUDIO" ]; then
-              if [ -f "$RAW_AUDIO" ]; then
-                TARGET_PATH="$RAW_AUDIO"
-              elif [ -f "assets/$RAW_AUDIO" ]; then
-                TARGET_PATH="assets/$RAW_AUDIO"
-              else
-                TARGET_PATH="$RAW_AUDIO"
-              fi
+              if [ -f "$RAW_AUDIO" ]; then TARGET_PATH="$RAW_AUDIO"
+              elif [ -f "assets/$RAW_AUDIO" ]; then TARGET_PATH="assets/$RAW_AUDIO"
+              else TARGET_PATH="$RAW_AUDIO"; fi
             else
               TARGET_PATH=$(ls assets/*.mp3 2>/dev/null | head -n 1 || true)
             fi
           fi
 
           if [ -z "${TARGET_PATH:-}" ] || [ ! -f "$TARGET_PATH" ] || ! ffprobe -v error -i "$TARGET_PATH" >/dev/null 2>&1; then
-            echo "Audio target not found or invalid. Creating fallback silent audio track..."
+            echo "Audio not found/invalid. Using silent fallback track."
             TARGET_PATH="assets/silent_fallback.mp3"
             ffmpeg -y -f lavfi -i anullsrc=r=44100:cl=stereo -t 10 -q:a 9 -acodec libmp3lame "$TARGET_PATH"
-          else
-            echo "Using audio track: $TARGET_PATH"
           fi
+          echo "Using audio: $TARGET_PATH"
 
+          # ---- Text settings (whitelisted so nothing unexpected reaches ffmpeg) ----
           TITLE_TEXT="${INPUT_TITLE:-${PAYLOAD_TITLE:-Default Title}}"
           VIDEO_URL="${PAYLOAD_URL:-https://drive.google.com/uc?export=download&id=14hrdDQTfbR3ExgH2sg_ZOk17YrprQ84u}"
-          COLOR="${INPUT_COLOR:-${PAYLOAD_COLOR:-white}}"
+          VIDEO_URL=$(printf '%s' "$VIDEO_URL" | tr -d '\n\r')
+
+          case "${INPUT_COLOR:-${PAYLOAD_COLOR:-white}}" in
+            yellow) HEX=0xfacc15 ;; orange) HEX=0xfb923c ;; red) HEX=0xf87171 ;;
+            pink) HEX=0xf472b6 ;; purple) HEX=0xc084fc ;; cyan) HEX=0x22d3ee ;;
+            green) HEX=0x4ade80 ;; *) HEX=0xffffff ;;
+          esac
+          case "${INPUT_POS:-${PAYLOAD_POS:-top}}" in center) POS=center ;; bottom) POS=bottom ;; *) POS=top ;; esac
+          case "${INPUT_STYLE:-${PAYLOAD_STYLE:-bold}}" in normal) STYLE=normal ;; outline) STYLE=outline ;; *) STYLE=bold ;; esac
           SIZE="${INPUT_SIZE:-${PAYLOAD_SIZE:-48}}"
-          POSITION="${INPUT_POS:-${PAYLOAD_POS:-top}}"
-          STYLE="${INPUT_STYLE:-${PAYLOAD_STYLE:-bold}}"
-
-          CLEANED_TITLE=$(printf '%s' "$TITLE_TEXT" \
-            | tr '\n' ' ' \
-            | sed -e 's/\\/\\\\/g' -e 's/:/\\:/g' -e "s/'/'\\\\''/g")
-
-          if [ "$POSITION" = "center" ]; then
-            Y_POS="(h-text_h)/2"
-          elif [ "$POSITION" = "bottom" ]; then
-            Y_POS="h-text_h-50"
-          else
-            Y_POS="50"
-          fi
-
-          if [ "$STYLE" = "normal" ]; then
-            FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-            EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
-          elif [ "$STYLE" = "outline" ]; then
-            FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-            EXTRA_DRAWTEXT="borderw=4:bordercolor=black:box=0"
-          else
-            FONT_PATH="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-            EXTRA_DRAWTEXT="borderw=0:box=1:boxcolor=black@0.5:boxborderw=10"
-          fi
-
           case "$SIZE" in ''|*[!0-9]*) SIZE=48 ;; esac
-          case "$COLOR" in ''|*[!a-zA-Z]*) COLOR=white ;; esac
 
-          echo "SELECTED_AUDIO=${TARGET_PATH}" >> "$GITHUB_ENV"
-          echo "SRC_URL=${VIDEO_URL}" >> "$GITHUB_ENV"
-          echo "TEXT_COLOR=${COLOR}" >> "$GITHUB_ENV"
-          echo "TEXT_SIZE=${SIZE}" >> "$GITHUB_ENV"
-          echo "Y_POSITION=${Y_POS}" >> "$GITHUB_ENV"
-          echo "FONT_PATH=${FONT_PATH}" >> "$GITHUB_ENV"
-          echo "EXTRA_DRAWTEXT=${EXTRA_DRAWTEXT}" >> "$GITHUB_ENV"
-          echo "RENDER_TITLE=${CLEANED_TITLE}" >> "$GITHUB_ENV"
+          # Raw title saved to a file: avoids all ffmpeg escaping problems
+          printf '%s' "$TITLE_TEXT" | tr '\n\r' '  ' > title_raw.txt
+
+          {
+            echo "SELECTED_AUDIO=${TARGET_PATH}"
+            echo "SRC_URL=${VIDEO_URL}"
+            echo "TEXT_COLOR=${HEX}"
+            echo "TEXT_SIZE=${SIZE}"
+            echo "TEXT_POS=${POS}"
+            echo "TEXT_STYLE=${STYLE}"
+          } >> "$GITHUB_ENV"
 
       - name: Download Video Source
         run: |
           set -euo pipefail
-          pip install --no-cache-dir gdown
+          python3 -m pip install --quiet --no-cache-dir --break-system-packages gdown
 
-          echo "Downloading Google Drive file via gdown..."
-          FILE_ID=$(echo "$SRC_URL" | sed -n 's/.*id=\([a-zA-Z0-9_-]*\).*/\1/p')
-
+          FILE_ID=$(echo "$SRC_URL" | sed -nE 's#.*(id=|/d/)([a-zA-Z0-9_-]+).*#\2#p' | head -n 1)
           if [ -n "$FILE_ID" ]; then
             gdown "https://drive.google.com/uc?id=${FILE_ID}&confirm=t" -O source.mp4
           else
@@ -154,36 +132,61 @@ jobs:
           fi
 
           if [ ! -s source.mp4 ] || file source.mp4 | grep -qi "HTML\|ASCII text"; then
-            echo "::error::Downloaded video file is invalid (got an HTML/error page instead of video)."
+            echo "::error::Downloaded video is invalid (got an HTML/error page). Is the Drive file shared as 'anyone with the link'?"
             exit 1
           fi
-          echo "Video successfully downloaded and validated."
 
       - name: Render Video — Overlay Text & Mix Audio
         run: |
           set -euo pipefail
-          HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 source.mp4 | wc -l)
-          DRAWTEXT="drawtext=fontfile='${FONT_PATH}':text='${RENDER_TITLE}':expansion=none:fontcolor=${TEXT_COLOR}:fontsize=${TEXT_SIZE}:${EXTRA_DRAWTEXT}:x=(w-text_w)/2:y=${Y_POSITION}"
 
+          # Scale everything to the video so 48px looks the same on 1080p or 4K
+          W=$(ffprobe -v error -select_streams v:0 -show_entries stream=width -of csv=p=0 source.mp4)
+          H=$(ffprobe -v error -select_streams v:0 -show_entries stream=height -of csv=p=0 source.mp4)
+          REF=$(( W < H ? W : H ))
+          FS=$(( TEXT_SIZE * REF / 1080 )); [ "$FS" -lt 12 ] && FS=12
+          MARG=$(( 50 * REF / 1080 )); PAD=$(( 10 * REF / 1080 )); BW=$(( 4 * REF / 1080 ))
+          [ "$BW" -lt 1 ] && BW=1
+
+          # Wrap long titles so they never run off the screen
+          CPL=$(( REF * 3 / (FS * 2) )); [ "$CPL" -lt 10 ] && CPL=10
+          fold -s -w "$CPL" title_raw.txt > title.txt
+
+          case "$TEXT_POS" in
+            center) Y="(h-text_h)/2" ;;
+            bottom) Y="h-text_h-${MARG}" ;;
+            *) Y="${MARG}" ;;
+          esac
+
+          BOLD=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+          REG=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+          case "$TEXT_STYLE" in
+            normal)  FONT=$REG;  EXTRA="box=1:boxcolor=black@0.5:boxborderw=${PAD}" ;;
+            outline) FONT=$BOLD; EXTRA="borderw=${BW}:bordercolor=black" ;;
+            *)       FONT=$BOLD; EXTRA="box=1:boxcolor=black@0.5:boxborderw=${PAD}" ;;
+          esac
+
+          DRAWTEXT="drawtext=fontfile=${FONT}:textfile=title.txt:expansion=none:fontcolor=${TEXT_COLOR}:fontsize=${FS}:${EXTRA}:x=(w-text_w)/2:y=${Y}"
+          HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 source.mp4 | wc -l)
+
+          # Music is looped (-stream_loop) so a short track never cuts the video short
           if [ "$HAS_AUDIO" -gt 0 ]; then
-            ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
+            ffmpeg -y -i source.mp4 -stream_loop -1 -i "$SELECTED_AUDIO" \
               -filter_complex \
               "[0:v]${DRAWTEXT}[v]; \
                [0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a1]; \
-               [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a2]; \
+               [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.4[a2]; \
                [a1][a2]amix=inputs=2:duration=first[aout]" \
               -map "[v]" -map "[aout]" \
-              -c:v libx264 -preset fast \
-              -c:a aac -b:a 192k -ar 44100 -ac 2 \
+              -c:v libx264 -preset fast -c:a aac -b:a 192k -ar 44100 -ac 2 \
               -shortest output/rendered_video.mp4
           else
-            ffmpeg -y -i source.mp4 -i "$SELECTED_AUDIO" \
+            ffmpeg -y -i source.mp4 -stream_loop -1 -i "$SELECTED_AUDIO" \
               -filter_complex \
               "[0:v]${DRAWTEXT}[v]; \
                [1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[aout]" \
               -map "[v]" -map "[aout]" \
-              -c:v libx264 -preset fast \
-              -c:a aac -b:a 192k -ar 44100 -ac 2 \
+              -c:v libx264 -preset fast -c:a aac -b:a 192k -ar 44100 -ac 2 \
               -shortest output/rendered_video.mp4
           fi
 
@@ -202,19 +205,16 @@ jobs:
           set -euo pipefail
           TAG="render-${{ github.run_id }}-${{ github.run_attempt }}"
 
-          gh release create "$TAG" \
-            output/rendered_video.mp4 \
+          gh release create "$TAG" output/rendered_video.mp4 \
             --repo "${{ github.repository }}" \
             --title "Render ${TAG}" \
             --notes "Automated render output"
 
           BROWSER_URL=$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[0].browser_download_url')
-
           if [ -z "$BROWSER_URL" ]; then
             echo "::error::Could not resolve a public URL for the release asset."
             exit 1
           fi
-
           echo "video_public_url=${BROWSER_URL}" >> "$GITHUB_OUTPUT"
           echo "Published: ${BROWSER_URL}"
 
@@ -225,15 +225,15 @@ jobs:
           N8N_WEBHOOK_SECRET: ${{ secrets.N8N_WEBHOOK_SECRET }}
           RENDERED_URL: ${{ steps.publish.outputs.video_public_url }}
         run: |
-          set -euo pipefail
           STATUS="${{ job.status }}"
+          CLEAN_TITLE=$(cat title_raw.txt 2>/dev/null || true)
           curl -sf -X POST "$N8N_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "x-webhook-secret: ${N8N_WEBHOOK_SECRET}" \
             -d "$(jq -n \
-                  --arg source_url "$SRC_URL" \
+                  --arg source_url "${SRC_URL:-}" \
                   --arg rendered_video_url "${RENDERED_URL:-}" \
-                  --arg title "${RENDER_TITLE:-}" \
+                  --arg title "$CLEAN_TITLE" \
                   --arg status "$STATUS" \
                   '{source_url:$source_url, rendered_video_url:$rendered_video_url, title:$title, status:$status}')" \
-            || echo "::warning::n8n notification failed (render status: $STATUS)"
+            || echo "::warning::n8n notification failed (render status: $STATUS). Check the N8N_WEBHOOK_SECRET secret matches n8n."
